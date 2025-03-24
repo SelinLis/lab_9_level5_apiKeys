@@ -1,29 +1,32 @@
 import express from "express";
 import bodyParser from "body-parser";
 import pg from "pg";
-import { emitWarning } from "process";
 import bcrypt from "bcrypt";
 import passport from "passport";
 import { Strategy } from "passport-local";
 import session from "express-session";
-import env from "dotenv";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 const port = 3000;
 const saltRounds = 10;
-env.config();
+
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.static("public"));
+
 
 app.use(
     session({
         secret: process.env.SESSION_SECRET,
         resave: false,
-        saveUninitialized: true,
+        saveUninitialized: false,
     })
 );
 
-
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(express.static("public"));
+app.use(passport.initialize());
+app.use(passport.session());
 
 const db = new pg.Client({
     user: process.env.PG_USER,
@@ -46,8 +49,8 @@ app.get("/register", (req, res) => {
     res.render("register.ejs");
 });
 
-app.get("/logout", (req, res) => {
-    res.logout(function (err) {
+app.get("/logout", (req, res, next) => {
+    req.logout((err) => {
         if (err) {
             return next(err);
         }
@@ -71,12 +74,12 @@ app.post(
     })
 );
 
-app.post("/register", async (req, res) => {
+app.post("/register", async (req, res, next) => {
     const email = req.body.username;
     const password = req.body.password;
 
     try {
-        const checkResult = await db.query("SELECT * FROM users WHERE email = $1", [email,]);
+        const checkResult = await db.query("SELECT * FROM users WHERE email = $1", [email]);
 
         if (checkResult.rows.length > 0) {
             res.redirect("/login");
@@ -84,61 +87,72 @@ app.post("/register", async (req, res) => {
             bcrypt.hash(password, saltRounds, async (err, hash) => {
                 if (err) {
                     console.error("Error hashing password: ", err);
-                } else {
-                    const result = await db.query(
-                        "INSERT INTO users (email, password) VALUES ($1, $2)",
-                        [email, hash]
-                    );
-                    const user = result.rows[0];
-                    req.login(user, (err) => {
-                        console.log("success");
-                        res.redirect("/secrets");
-                    })
+                    return next(err);
                 }
+
+                await db.query(
+                    "INSERT INTO users (email, password) VALUES ($1, $2)",
+                    [email, hash]
+                );
+
+                passport.authenticate("local")(req, res, () => {
+                    res.redirect("/secrets");
+                });
             });
         }
     } catch (err) {
         console.log(err);
+        next(err);
     }
-});;
+});
 
 passport.use(
-    new Strategy(async function verify(username, password, cd) {
+    new Strategy(async function verify(username, password, cb) {
         try {
-            const result = await db.query("SELECT * FROM users WHERE email = $1", [username,]);
+            const result = await db.query("SELECT * FROM users WHERE email = $1", [username]);
+
             if (result.rows.length > 0) {
                 const user = result.rows[0];
                 const storedHashedPassword = user.password;
-                bcrypt.compare(loginPassword, storedHashedPassword, (err, result) => {
 
+                bcrypt.compare(password, storedHashedPassword, (err, isValid) => {
                     if (err) {
                         console.error("Error comparing passwords:", err);
                         return cb(err);
-                    } else {
-                        if (valid) {
-                            return cb(null, user);
-                        } else {
-                            return cb(null, false);
-                        }
                     }
-
+                    if (isValid) {
+                        return cb(null, user);
+                    } else {
+                        return cb(null, false);
+                    }
                 });
             } else {
-                return cb("User not found");
+                return cb(null, false);
             }
         } catch (err) {
             console.log(err);
+            return cb(err);
         }
-    }
-    )
+    })
 );
 
 passport.serializeUser((user, cb) => {
-    cb(null, user);
+    cb(null, user.id);
 });
-passport.deserializeUser((user, cb) => {
-    cb(null, user);
+
+passport.deserializeUser(async (id, cb) => {
+    try {
+        const result = await db.query("SELECT * FROM users WHERE id = $1", [id]);
+        if (result.rows.length > 0) {
+            cb(null, result.rows[0]);
+        } else {
+            cb(null, false);
+        }
+    } catch (err) {
+        cb(err);
+    }
 });
+
 app.listen(port, () => {
     console.log(`Server running on http://localhost:${port}`);
 });
